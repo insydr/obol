@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::config::AppConfig;
-use crate::error::{CharonError, Result};
+use crate::error::Result;
 use crate::signals::SignalEvent;
 
 /// Fee claim event from the Pump.fun WebSocket.
@@ -18,7 +18,8 @@ pub struct FeeClaimEvent {
 }
 
 /// Connects to the Pump.fun fee-claim WebSocket and streams fee claim
-/// events as [`SignalEvent`]s.  Reconnects automatically on disconnect.
+/// events as [`SignalEvent`]s.  Reconnects automatically on disconnect
+/// with exponential backoff.
 pub struct FeeClaimListener {
     ws_url: String,
 }
@@ -34,12 +35,17 @@ impl FeeClaimListener {
     }
 
     /// Connect and stream events.  Reconnects with exponential backoff on
-    /// errors.
+    /// errors, starting at 1s and capping at 60s.
     pub async fn listen(&self, tx: mpsc::Sender<SignalEvent>) -> Result<()> {
+        let mut backoff_secs: u64 = 1;
+
         loop {
             match connect_async(&self.ws_url).await {
                 Ok((ws_stream, _)) => {
                     tracing::info!("Connected to fee-claim WebSocket");
+                    // Reset backoff on successful connection.
+                    backoff_secs = 1;
+
                     let (_, mut read) = ws_stream.split();
 
                     while let Some(msg) = read.next().await {
@@ -56,7 +62,7 @@ impl FeeClaimListener {
                                     }
                                 }
                             }
-                            Ok(Message::Ping(data)) => {
+                            Ok(Message::Ping(_data)) => {
                                 tracing::trace!("WS ping received");
                             }
                             Ok(Message::Close(_)) => {
@@ -76,8 +82,13 @@ impl FeeClaimListener {
                 }
             }
 
-            // Backoff before reconnect.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // Exponential backoff before reconnect, capped at 60s.
+            tracing::info!(
+                backoff_secs = backoff_secs,
+                "Reconnecting fee-claim WebSocket after backoff"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            backoff_secs = (backoff_secs * 2).min(60);
         }
     }
 

@@ -1,3 +1,4 @@
+use chrono::Utc;
 use rusqlite::{params, Connection};
 use crate::db::models::*;
 use crate::db::DbPool;
@@ -41,7 +42,7 @@ impl CandidateRepo {
 
             cand.source_count = merged.len() as i32;
             cand.sources = Some(serde_json::to_string(&merged).unwrap_or_default());
-            cand.last_updated_at = chrono::Utc::now().naive_utc().to_string();
+            cand.last_updated_at = Utc::now().naive_utc().to_string();
 
             if signal.source == "fee_claim" {
                 cand.fee_claim_count += 1;
@@ -64,7 +65,7 @@ impl CandidateRepo {
         } else {
             let sources = serde_json::to_string(&vec![signal.source.clone()]).unwrap_or_default();
             let fee_claim_count = if signal.source == "fee_claim" { 1 } else { 0 };
-            let now = chrono::Utc::now().naive_utc().to_string();
+            let now = Utc::now().naive_utc().to_string();
 
             conn.execute(
                 "INSERT INTO candidates (mint, source_count, sources, fee_claim_count, first_seen_at, last_updated_at, status)
@@ -90,6 +91,7 @@ impl CandidateRepo {
                 first_seen_at: now.clone(),
                 last_updated_at: now,
                 status: "pending".to_string(),
+                buy_sol: 0.0,
             })
         }
     }
@@ -153,6 +155,22 @@ impl CandidateRepo {
             .ok();
         Ok(result)
     }
+
+    /// Get a candidate by ID.
+    pub fn get_by_id(pool: &DbPool, id: i64) -> Result<Option<Candidate>> {
+        let conn = pool.get()?;
+        let result = conn
+            .query_row(
+                "SELECT id, mint, name, symbol, uri, source_count, sources, market_cap_sol,
+                        market_cap_usd, holder_count, top_holder_pct, ath_distance_pct,
+                        fee_claim_count, first_seen_at, last_updated_at, status
+                 FROM candidates WHERE id = ?1",
+                params![id],
+                |row| Ok(map_candidate(row)),
+            )
+            .ok();
+        Ok(result)
+    }
 }
 
 fn map_candidate(row: &rusqlite::Row<'_>) -> Candidate {
@@ -173,6 +191,7 @@ fn map_candidate(row: &rusqlite::Row<'_>) -> Candidate {
         first_seen_at: row.get(13).unwrap_or_default(),
         last_updated_at: row.get(14).unwrap_or_default(),
         status: row.get(15).unwrap_or_else(|_| "pending".to_string()),
+        buy_sol: 0.0, // Populated from strategy at approval time, not stored in DB
     }
 }
 
@@ -186,7 +205,7 @@ impl PositionRepo {
     /// Open a new position from approved candidate parameters.
     pub fn open(pool: &DbPool, params: &OpenPositionParams) -> Result<Position> {
         let conn = pool.get()?;
-        let now = chrono::Utc::now().naive_utc().to_string();
+        let now = Utc::now().naive_utc().to_string();
         conn.execute(
             "INSERT INTO positions (mint, symbol, buy_sol, tp_percent, sl_percent,
                     trailing_stop_pct, trailing_activated, highest_pnl_pct, status, opened_at, tx_buy_sig)
@@ -210,7 +229,7 @@ impl PositionRepo {
             entry_price: None,
             current_price: None,
             buy_sol: params.buy_sol,
-            token_amount: None,
+            token_amount: params.token_amount,
             pnl_percent: 0.0,
             pnl_sol: 0.0,
             tp_percent: Some(params.tp_percent),
@@ -261,6 +280,26 @@ impl PositionRepo {
         Ok(())
     }
 
+    /// Update the token amount for a position (set after buy confirmation).
+    pub fn update_token_amount(pool: &DbPool, id: i64, token_amount: f64) -> Result<()> {
+        let conn = pool.get()?;
+        conn.execute(
+            "UPDATE positions SET token_amount = ?1 WHERE id = ?2",
+            params![token_amount, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the entry price for a position (set after buy confirmation).
+    pub fn update_entry_price(pool: &DbPool, id: i64, entry_price: f64) -> Result<()> {
+        let conn = pool.get()?;
+        conn.execute(
+            "UPDATE positions SET entry_price = ?1 WHERE id = ?2",
+            params![entry_price, id],
+        )?;
+        Ok(())
+    }
+
     /// Close a position with a reason and optional tx signature.
     pub fn close(pool: &DbPool, id: i64, reason: &str, tx_sell_sig: Option<&str>) -> Result<()> {
         let conn = pool.get()?;
@@ -297,6 +336,16 @@ impl PositionRepo {
             .query_row("SELECT COUNT(*) FROM positions WHERE status = 'open'", [], |row| row.get(0))
             .unwrap_or(0);
         Ok(count)
+    }
+
+    /// Get mints of all open positions (for price monitoring).
+    pub fn get_open_mints(pool: &DbPool) -> Result<Vec<String>> {
+        let conn = pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT mint FROM positions WHERE status = 'open'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 }
 
@@ -444,6 +493,55 @@ impl DecisionRepo {
             params![candidate_id, decision_type, action, confidence, reasoning, model_name],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ExecutionLogRepo
+// ═══════════════════════════════════════════════════════════════════════════
+
+pub struct ExecutionLogRepo;
+
+impl ExecutionLogRepo {
+    /// Log an execution attempt.
+    pub fn insert(
+        pool: &DbPool,
+        position_id: Option<i64>,
+        mint: &str,
+        action: &str,
+        amount_sol: Option<f64>,
+        token_amount: Option<f64>,
+        tx_signature: Option<&str>,
+        status: &str,
+        error_msg: Option<&str>,
+    ) -> Result<i64> {
+        let conn = pool.get()?;
+        conn.execute(
+            "INSERT INTO execution_log (position_id, mint, action, amount_sol, token_amount, tx_signature, status, error_msg)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![position_id, mint, action, amount_sol, token_amount, tx_signature, status, error_msg],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Mark an execution log as successful.
+    pub fn mark_success(pool: &DbPool, id: i64, tx_signature: Option<&str>) -> Result<()> {
+        let conn = pool.get()?;
+        conn.execute(
+            "UPDATE execution_log SET status = 'success', tx_signature = ?1 WHERE id = ?2",
+            params![tx_signature, id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark an execution log as failed.
+    pub fn mark_failed(pool: &DbPool, id: i64, error_msg: &str) -> Result<()> {
+        let conn = pool.get()?;
+        conn.execute(
+            "UPDATE execution_log SET status = 'failed', error_msg = ?1 WHERE id = ?2",
+            params![error_msg, id],
+        )?;
+        Ok(())
     }
 }
 

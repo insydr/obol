@@ -1,16 +1,15 @@
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
 };
-use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::error::{CharonError, Result};
 
-/// Wallet service wrapping Solana keypair and RPC client.
+/// Wallet service wrapping Solana keypair and async RPC client.
 /// Handles balance checks and transaction signing.
 pub struct WalletService {
     keypair: Keypair,
@@ -23,6 +22,14 @@ impl WalletService {
         let keypair_bytes = bs58::decode(&config.solana_private_key_bs58)
             .into_vec()
             .map_err(|e| CharonError::Config(format!("Invalid SOLANA_PRIVATE_KEY: {}", e)))?;
+
+        // Validate key length (64 bytes for Ed25519 keypair).
+        if keypair_bytes.len() != 64 {
+            return Err(CharonError::Config(format!(
+                "Invalid SOLANA_PRIVATE_KEY length: expected 64 bytes, got {}",
+                keypair_bytes.len()
+            )));
+        }
 
         let keypair = Keypair::from_bytes(&keypair_bytes)
             .map_err(|e| CharonError::Config(format!("Failed to create keypair: {}", e)))?;
@@ -46,7 +53,7 @@ impl WalletService {
         &self.keypair
     }
 
-    /// Get a reference to the RPC client.
+    /// Get a reference to the async RPC client.
     pub fn rpc_client(&self) -> &RpcClient {
         &self.rpc
     }

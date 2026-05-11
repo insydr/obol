@@ -85,6 +85,9 @@ pub struct AppConfig {
     pub gmgn_rate_limit_per_sec: u32,
     pub jupiter_rate_limit_per_sec: u32,
 
+    // ── Pipeline ───────────────────────────────────────────────────────
+    pub pipeline_concurrency_limit: u32,
+
     // ── Misc ────────────────────────────────────────────────────────────
     pub log_level: String,
 }
@@ -134,6 +137,8 @@ impl AppConfig {
 
             gmgn_rate_limit_per_sec: env_or_parse("GMGN_RATE_LIMIT_PER_SEC", 2)?,
             jupiter_rate_limit_per_sec: env_or_parse("JUPITER_RATE_LIMIT_PER_SEC", 5)?,
+
+            pipeline_concurrency_limit: env_or_parse("PIPELINE_CONCURRENCY_LIMIT", 5)?,
 
             log_level: env_or("LOG_LEVEL", "info".into()),
         };

@@ -84,6 +84,8 @@ pub struct Candidate {
     pub first_seen_at: String,
     pub last_updated_at: String,
     pub status: String,
+    /// Buy amount from strategy at time of approval (for confirm mode).
+    pub buy_sol: f64,
 }
 
 /// A candidate enriched with additional data from Jupiter/GMGN/Twitter,
@@ -149,6 +151,8 @@ pub struct OpenPositionParams {
     pub sl_percent: f64,
     pub trailing_stop_pct: Option<f64>,
     pub tx_buy_sig: Option<String>,
+    /// Token amount received from swap (set after buy confirmation).
+    pub token_amount: Option<f64>,
 }
 
 // ── Decision ──────────────────────────────────────────────────────────────

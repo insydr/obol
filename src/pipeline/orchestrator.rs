@@ -3,8 +3,8 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::config::AppConfig;
 use crate::db::models::*;
-use crate::db::{CandidateRepo, DbPool, DecisionRepo, PositionRepo, StrategyRepo};
-use crate::enrichment::{EnrichmentService, EnrichmentData};
+use crate::db::{CandidateRepo, DbPool, DecisionRepo, ExecutionLogRepo, PositionRepo, StrategyRepo};
+use crate::enrichment::{EnrichmentData, EnrichmentService};
 use crate::error::{CharonError, Result};
 use crate::execution::router::SwapRouter;
 use crate::pipeline::candidate::CandidateBuilder;
@@ -107,7 +107,10 @@ impl PipelineOrchestrator {
             )?;
         }
 
-        // Re-check filters with enriched data if needed.
+        let mut candidate = candidate;
+        // Populate buy_sol from current strategy for confirm mode display.
+        candidate.buy_sol = strategy.buy_sol;
+
         let enriched = EnrichedCandidate {
             candidate: candidate.clone(),
             jupiter_data: enrichment_data.as_ref().and_then(|d| d.jupiter.clone()),
@@ -161,6 +164,7 @@ impl PipelineOrchestrator {
                         sl_percent,
                         trailing_stop_pct: strategy.trailing_stop_pct,
                         tx_buy_sig: Some("dry_run".to_string()),
+                        token_amount: None,
                     },
                 )?;
                 Ok(PipelineOutcome::DryRun(position))
@@ -173,37 +177,132 @@ impl PipelineOrchestrator {
                 Ok(PipelineOutcome::AwaitingConfirmation(enriched))
             }
             crate::config::TradingMode::Live => {
-                #[cfg(feature = "live-trading")]
-                {
-                    tracing::info!(mint = %candidate.mint, buy_sol = buy_sol, "LIVE: Executing buy");
-                    match self.router.buy(&candidate.mint, buy_sol).await {
-                        Ok(tx_sig) => {
-                            let position = PositionRepo::open(
-                                &self.db,
-                                &OpenPositionParams {
-                                    mint: candidate.mint.clone(),
-                                    symbol: candidate.symbol.clone(),
-                                    buy_sol,
-                                    tp_percent,
-                                    sl_percent,
-                                    trailing_stop_pct: strategy.trailing_stop_pct,
-                                    tx_buy_sig: Some(tx_sig.clone()),
-                                },
-                            )?;
-                            Ok(PipelineOutcome::Executed(position, tx_sig))
-                        }
-                        Err(e) => {
-                            tracing::error!(mint = %candidate.mint, error = %e, "Live buy failed");
-                            Err(e)
-                        }
+                self.execute_live_buy(&candidate, buy_sol, tp_percent, sl_percent, &strategy).await
+            }
+        }
+    }
+
+    /// Execute a buy for an already-approved candidate (called from
+    /// Telegram /confirm command or inline keyboard).
+    pub async fn execute_approved(&self, candidate_id: i64) -> Result<String> {
+        let candidate = CandidateRepo::get_by_id(&self.db, candidate_id)?
+            .ok_or_else(|| CharonError::Execution(format!("Candidate #{} not found", candidate_id)))?;
+
+        let strategy = self.strategy.read().await.clone();
+
+        match self.config.trading_mode {
+            crate::config::TradingMode::DryRun => {
+                let position = PositionRepo::open(
+                    &self.db,
+                    &OpenPositionParams {
+                        mint: candidate.mint.clone(),
+                        symbol: candidate.symbol.clone(),
+                        buy_sol: strategy.buy_sol,
+                        tp_percent: strategy.tp_percent,
+                        sl_percent: strategy.sl_percent,
+                        trailing_stop_pct: strategy.trailing_stop_pct,
+                        tx_buy_sig: Some("dry_run".to_string()),
+                        token_amount: None,
+                    },
+                )?;
+                Ok(format!(
+                    "🧪 DRY RUN: Simulated buy #{} — {} ({}) — {:.3} SOL",
+                    position.id,
+                    position.symbol.as_deref().unwrap_or("???"),
+                    &position.mint[..8],
+                    position.buy_sol,
+                ))
+            }
+            crate::config::TradingMode::Confirm | crate::config::TradingMode::Live => {
+                match self.execute_live_buy(
+                    &candidate,
+                    strategy.buy_sol,
+                    strategy.tp_percent,
+                    strategy.sl_percent,
+                    &strategy,
+                ).await {
+                    Ok(PipelineOutcome::Executed(position, tx_sig)) => {
+                        Ok(format!(
+                            "✅ Trade executed #{} — {} ({}) — {:.3} SOL | TX: {}...",
+                            position.id,
+                            position.symbol.as_deref().unwrap_or("???"),
+                            &position.mint[..8],
+                            position.buy_sol,
+                            &tx_sig[..16],
+                        ))
                     }
-                }
-                #[cfg(not(feature = "live-trading"))]
-                {
-                    tracing::warn!("Live trading is disabled (compile with --features live-trading)");
-                    Ok(PipelineOutcome::Rejected("live_trading_disabled".to_string()))
+                    Ok(other) => Ok(format!("Unexpected outcome: {:?}", other)),
+                    Err(e) => Err(e),
                 }
             }
+        }
+    }
+
+    /// Execute a live buy via Jupiter, tracking token amounts and logging
+    /// the execution.
+    async fn execute_live_buy(
+        &self,
+        candidate: &Candidate,
+        buy_sol: f64,
+        tp_percent: f64,
+        sl_percent: f64,
+        strategy: &StrategyConfig,
+    ) -> Result<PipelineOutcome> {
+        #[cfg(feature = "live-trading")]
+        {
+            tracing::info!(mint = %candidate.mint, buy_sol = buy_sol, "LIVE: Executing buy");
+
+            // Log the execution attempt.
+            let log_id = ExecutionLogRepo::insert(
+                &self.db,
+                None,
+                &candidate.mint,
+                "buy",
+                Some(buy_sol),
+                None,
+                None,
+                "pending",
+                None,
+            )?;
+
+            match self.router.buy(&candidate.mint, buy_sol).await {
+                Ok(swap_result) => {
+                    // Open position with token amount from swap.
+                    let token_amount = swap_result.token_amount.map(|a| a as f64);
+                    let position = PositionRepo::open(
+                        &self.db,
+                        &OpenPositionParams {
+                            mint: candidate.mint.clone(),
+                            symbol: candidate.symbol.clone(),
+                            buy_sol,
+                            tp_percent,
+                            sl_percent,
+                            trailing_stop_pct: strategy.trailing_stop_pct,
+                            tx_buy_sig: Some(swap_result.signature.clone()),
+                            token_amount,
+                        },
+                    )?;
+
+                    // Mark execution log as successful.
+                    ExecutionLogRepo::mark_success(
+                        &self.db,
+                        log_id,
+                        Some(&swap_result.signature),
+                    )?;
+
+                    Ok(PipelineOutcome::Executed(position, swap_result.signature))
+                }
+                Err(e) => {
+                    tracing::error!(mint = %candidate.mint, error = %e, "Live buy failed");
+                    ExecutionLogRepo::mark_failed(&self.db, log_id, &e.to_string())?;
+                    Err(e)
+                }
+            }
+        }
+        #[cfg(not(feature = "live-trading"))]
+        {
+            tracing::warn!("Live trading is disabled (compile with --features live-trading)");
+            Ok(PipelineOutcome::Rejected("live_trading_disabled".to_string()))
         }
     }
 }

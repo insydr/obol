@@ -1,5 +1,6 @@
 use teloxide::{
     prelude::*,
+    types::CallbackQuery,
     utils::command::BotCommands,
 };
 
@@ -23,6 +24,12 @@ pub enum Command {
     Positions,
     #[command(description = "Show recent candidates")]
     Candidates,
+    #[command(description = "Show pending confirmations")]
+    Pending,
+    #[command(description = "Confirm a trade: /confirm <candidate_id>")]
+    Confirm(i64),
+    #[command(description = "Reject a trade: /reject <candidate_id>")]
+    Reject(i64),
     #[command(description = "Show bot status and wallet info")]
     Status,
     #[command(description = "Show recent lessons")]
@@ -43,6 +50,9 @@ pub async fn handle_command(bot: Bot, msg: Message, cmd: Command, charon: &Charo
         Command::StratSet(args) => handle_strat_set(args, charon),
         Command::Positions => format_positions(charon.db()),
         Command::Candidates => format_candidates(charon.db()),
+        Command::Pending => format_pending(charon.db()),
+        Command::Confirm(candidate_id) => handle_confirm(candidate_id, charon).await,
+        Command::Reject(candidate_id) => handle_reject(candidate_id, charon),
         Command::Status => format_status(charon),
         Command::Lessons => format_lessons(charon.db()),
         Command::Reload => {
@@ -57,6 +67,85 @@ pub async fn handle_command(bot: Bot, msg: Message, cmd: Command, charon: &Charo
     }
 }
 
+/// Handle inline keyboard callback queries (✅/❌ buttons).
+pub async fn handle_callback_query(bot: Bot, query: CallbackQuery, charon: &CharonBot) {
+    let data = match query.data {
+        Some(d) => d,
+        None => {
+            let _ = bot.answer_callback_query(query.id).await;
+            return;
+        }
+    };
+
+    let response_text = if let Some((action, id_str)) = data.split_once(':') {
+        match id_str.parse::<i64>() {
+            Ok(candidate_id) => match action {
+                "confirm" => handle_confirm(candidate_id, charon).await,
+                "reject" => handle_reject(candidate_id, charon),
+                _ => format!("Unknown action: {}", action),
+            },
+            Err(_) => format!("Invalid candidate ID: {}", id_str),
+        }
+    } else {
+        format!("Invalid callback data: {}", data)
+    };
+
+    // Answer the callback query to dismiss the loading indicator.
+    if let Err(e) = bot.answer_callback_query(&query.id).await {
+        tracing::error!("Failed to answer callback query: {}", e);
+    }
+
+    // Send the response message.
+    if let Some(chat) = query.message.and_then(|m| Some(m.chat)) {
+        if let Err(e) = bot.send_message(chat.id, response_text).await {
+            tracing::error!("Failed to send callback response: {}", e);
+        }
+    }
+}
+
+/// Confirm a pending candidate for execution.
+async fn handle_confirm(candidate_id: i64, charon: &CharonBot) -> String {
+    match CandidateRepo::get_by_id(charon.db(), candidate_id) {
+        Ok(Some(candidate)) => {
+            if candidate.status != "approved" && candidate.status != "pending" {
+                return format!(
+                    "Candidate #{} already processed (status: {})",
+                    candidate_id, candidate.status
+                );
+            }
+
+            // Update candidate status to approved.
+            if candidate.status == "pending" {
+                if let Err(e) = CandidateRepo::update_status(charon.db(), candidate_id, "approved") {
+                    return format!("Failed to approve candidate: {}", e);
+                }
+            }
+
+            // Execute the trade through the orchestrator.
+            match charon.orchestrator().execute_approved(candidate_id).await {
+                Ok(msg) => msg,
+                Err(e) => format!("Trade execution failed for #{}: {}", candidate_id, e),
+            }
+        }
+        Ok(None) => format!("Candidate #{} not found", candidate_id),
+        Err(e) => format!("Database error: {}", e),
+    }
+}
+
+/// Reject a pending candidate.
+fn handle_reject(candidate_id: i64, charon: &CharonBot) -> String {
+    match CandidateRepo::get_by_id(charon.db(), candidate_id) {
+        Ok(Some(_)) => {
+            match CandidateRepo::update_status(charon.db(), candidate_id, "rejected") {
+                Ok(()) => format!("❌ Candidate #{} rejected", candidate_id),
+                Err(e) => format!("Failed to reject candidate: {}", e),
+            }
+        }
+        Ok(None) => format!("Candidate #{} not found", candidate_id),
+        Err(e) => format!("Database error: {}", e),
+    }
+}
+
 fn format_menu() -> String {
     String::from(
         "🚀 **Charon Trading Bot**\n\n\
@@ -64,6 +153,9 @@ fn format_menu() -> String {
          /stratset <field> <value> - Update strategy\n\
          /positions - Open positions\n\
          /candidates - Recent candidates\n\
+         /pending - Awaiting confirmation\n\
+         /confirm <id> - Confirm a trade\n\
+         /reject <id> - Reject a trade\n\
          /status - Bot status\n\
          /lessons - Trade lessons\n\
          /reload - Reload strategy\n\
@@ -115,7 +207,6 @@ fn handle_strat_set(args: String, charon: &CharonBot) -> String {
 
     match StrategyRepo::set_field(charon.db(), "sniper", field, &value) {
         Ok(()) => {
-            // Trigger hot-reload.
             format!("Strategy field '{}' updated to '{}'. Use /reload to apply.", field, value)
         }
         Err(e) => format!("Failed to update strategy: {}", e),
@@ -132,8 +223,8 @@ fn format_positions(db: &crate::db::DbPool) -> String {
             for p in &positions {
                 let symbol = p.symbol.as_deref().unwrap_or("???");
                 msg.push_str(&format!(
-                    "• {} ({}) — {:.3} SOL | PnL: {:.1}% ({:.4} SOL)\n",
-                    symbol, &p.mint[..8], p.buy_sol, p.pnl_percent, p.pnl_sol
+                    "• #{} {} ({}) — {:.3} SOL | PnL: {:.1}% ({:.4} SOL)\n",
+                    p.id, symbol, &p.mint[..8], p.buy_sol, p.pnl_percent, p.pnl_sol
                 ));
             }
             msg
@@ -152,7 +243,8 @@ fn format_candidates(db: &crate::db::DbPool) -> String {
             for c in candidates.iter().take(10) {
                 let symbol = c.symbol.as_deref().unwrap_or("???");
                 msg.push_str(&format!(
-                    "• {} ({}) — Sources: {} | MC: {:?} SOL\n",
+                    "• #{} {} ({}) — Sources: {} | MC: {:?} SOL\n",
+                    c.id,
                     symbol,
                     &c.mint[..8],
                     c.source_count,
@@ -162,6 +254,33 @@ fn format_candidates(db: &crate::db::DbPool) -> String {
             msg
         }
         Err(e) => format!("Error loading candidates: {}", e),
+    }
+}
+
+fn format_pending(db: &crate::db::DbPool) -> String {
+    match CandidateRepo::list_by_status(db, "approved") {
+        Ok(candidates) => {
+            if candidates.is_empty() {
+                return "No pending confirmations.".to_string();
+            }
+            let mut msg = String::from("⏳ **Pending Confirmations**\n\n");
+            for c in candidates.iter().take(10) {
+                let symbol = c.symbol.as_deref().unwrap_or("???");
+                msg.push_str(&format!(
+                    "• #{} {} ({}) — Sources: {} | MC: {:?} SOL\n\
+                     Use /confirm {} or /reject {}\n\n",
+                    c.id,
+                    symbol,
+                    &c.mint[..8],
+                    c.source_count,
+                    c.market_cap_sol,
+                    c.id,
+                    c.id,
+                ));
+            }
+            msg
+        }
+        Err(e) => format!("Error loading pending: {}", e),
     }
 }
 

@@ -6,8 +6,14 @@ pub enum CharonError {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    #[error("Signal fetch failed: {0}")]
-    SignalFetch(#[from] reqwest::Error),
+    #[error("Signal fetch failed with HTTP {status}: {body}")]
+    SignalFetchFailed {
+        status: u16,
+        body: String,
+    },
+
+    #[error("HTTP request error: {0}")]
+    Http(#[from] reqwest::Error),
 
     #[error("WebSocket error: {0}")]
     WebSocket(String),
@@ -44,6 +50,9 @@ pub enum CharonError {
 
     #[error("Timeout: {0}")]
     Timeout(String),
+
+    #[error("Transaction not confirmed: {0}")]
+    TransactionNotConfirmed(String),
 
     #[error("Internal: {0}")]
     Internal(String),

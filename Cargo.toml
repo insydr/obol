@@ -1,6 +1,6 @@
 [package]
 name = "charon-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Solana/Pump.fun trading bot — Rust rewrite of Charon"
 license = "MIT"
@@ -13,6 +13,7 @@ live-trading = []
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
 
 # HTTP / WebSocket
@@ -51,21 +52,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# UUID
-uuid = { version = "1.0", features = ["v4"] }
-
-# Rate limiting
-governor = "0.6"
-
-# Math / finance
-rust_decimal = { version = "1.33", features = ["serde"] }
-rust_decimal_macros = "1.33"
-
-# Caching
-moka = { version = "0.12", features = ["future"] }
-
-# Hex encoding for tx signatures
-hex = "0.4"
-
-# Base64
-base64 = "0.22"
+# HMAC for signal authentication
+hmac = "0.12"
+sha2 = "0.10"

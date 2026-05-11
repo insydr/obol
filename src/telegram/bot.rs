@@ -2,17 +2,18 @@ use std::sync::Arc;
 
 use teloxide::{
     prelude::*,
+    types::Update,
     utils::command::BotCommands,
 };
-use tokio::sync::RwLock;
 
 use crate::config::AppConfig;
-use crate::db::{CandidateRepo, DbPool, PositionRepo, StrategyRepo};
+use crate::db::DbPool;
 use crate::pipeline::orchestrator::PipelineOrchestrator;
-use crate::telegram::commands::{Command, handle_command};
+use crate::telegram::commands::{Command, handle_command, handle_callback_query};
 use crate::telegram::formatting::TelegramFormatter;
 
-/// The Telegram bot wrapper.  Manages command routing and message delivery.
+/// The Telegram bot wrapper.  Manages command routing, inline keyboard
+/// callbacks, and message delivery.
 pub struct CharonBot {
     bot: Bot,
     chat_id: ChatId,
@@ -40,11 +41,11 @@ impl CharonBot {
         }
     }
 
-    /// Start the bot's command listener.
+    /// Start the bot's command listener with both message and callback handlers.
     pub async fn run(self: Arc<Self>) {
         tracing::info!("Starting Telegram bot...");
 
-        let handler = Update::filter_message()
+        let cmd_handler = Update::filter_message()
             .branch(
                 dptree::entry()
                     .filter_command::<Command>()
@@ -55,6 +56,19 @@ impl CharonBot {
                         }
                     }),
             );
+
+        let callback_handler = Update::filter_callback_query()
+            .branch(
+                dptree::entry()
+                    .endpoint(move |bot: Bot, query: CallbackQuery| {
+                        let this = self.clone();
+                        async move {
+                            handle_callback_query(bot, query, &this).await;
+                        }
+                    }),
+            );
+
+        let handler = cmd_handler.branch(callback_handler);
 
         let bot_clone = self.bot.clone();
         Dispatcher::builder(bot_clone, handler)
@@ -70,9 +84,10 @@ impl CharonBot {
         }
     }
 
-    /// Send a candidate alert for manual confirmation.
+    /// Send a candidate alert with inline keyboard for manual confirmation.
     pub async fn send_candidate_alert(
         &self,
+        candidate_id: i64,
         mint: &str,
         symbol: &str,
         buy_sol: f64,
@@ -80,13 +95,23 @@ impl CharonBot {
         market_cap_sol: Option<f64>,
     ) {
         let msg = self.formatter.format_candidate_alert(
+            candidate_id,
             mint,
             symbol,
             buy_sol,
             sources,
             market_cap_sol,
         );
-        self.send_message(&msg).await;
+        let keyboard = self.formatter.build_trade_confirmation_keyboard(candidate_id);
+
+        if let Err(e) = self
+            .bot
+            .send_message(self.chat_id, msg)
+            .reply_markup(keyboard)
+            .await
+        {
+            tracing::error!("Failed to send candidate alert: {}", e);
+        }
     }
 
     /// Send a position update notification.

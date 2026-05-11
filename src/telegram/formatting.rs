@@ -1,10 +1,13 @@
 /// Telegram message formatting utilities.
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+
 pub struct TelegramFormatter;
 
 impl TelegramFormatter {
-    /// Format a candidate alert for manual confirmation.
+    /// Format a candidate alert for manual confirmation with inline keyboard.
     pub fn format_candidate_alert(
         &self,
+        candidate_id: i64,
         mint: &str,
         symbol: &str,
         buy_sol: f64,
@@ -17,14 +20,28 @@ impl TelegramFormatter {
             .unwrap_or_else(|| "N/A".to_string());
         format!(
             "🎯 **New Candidate**\n\n\
+             ID: {}\n\
              Symbol: {}\n\
              Mint: {}\n\
              Sources: {}\n\
              Market cap: {}\n\
-             Proposed buy: {:.3} SOL\n\n\
-             Use /confirm {} or /reject {}",
-            symbol, mint, sources_str, mc_str, buy_sol, &mint[..8], &mint[..8]
+             Proposed buy: {:.3} SOL",
+            candidate_id, symbol, mint, sources_str, mc_str, buy_sol
         )
+    }
+
+    /// Build inline keyboard for trade confirmation.
+    pub fn build_trade_confirmation_keyboard(&self, candidate_id: i64) -> InlineKeyboardMarkup {
+        InlineKeyboardMarkup::new(vec![vec![
+            InlineKeyboardButton::callback(
+                "✅ Confirm",
+                format!("confirm:{}", candidate_id),
+            ),
+            InlineKeyboardButton::callback(
+                "❌ Reject",
+                format!("reject:{}", candidate_id),
+            ),
+        ]])
     }
 
     /// Format a position update notification.

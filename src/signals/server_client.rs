@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
-use crate::db::{CandidateRepo, DbPool, NewSignal};
 use crate::error::{CharonError, Result};
 use crate::utils::retry::retry_with_backoff;
 
@@ -67,11 +66,10 @@ impl SignalServerClient {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(CharonError::SignalFetch(reqwest::Error::from(
-                    reqwest::StatusCode::from(status.as_u16())
-                        .map(|_| ())
-                        .unwrap_or(()),
-                )));
+                return Err(CharonError::SignalFetchFailed {
+                    status: status.as_u16(),
+                    body,
+                });
             }
 
             let data: SignalServerResponse = resp.json().await?;

@@ -56,4 +56,4 @@ pub mod schema;
 pub mod models;
 pub mod repos;
 
-pub use repos::{CandidateRepo, PositionRepo, StrategyRepo, DecisionRepo, LessonRepo};
+pub use repos::{CandidateRepo, PositionRepo, StrategyRepo, DecisionRepo, LessonRepo, ExecutionLogRepo};
