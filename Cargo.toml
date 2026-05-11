@@ -1,0 +1,71 @@
+[package]
+name = "charon-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Solana/Pump.fun trading bot — Rust rewrite of Charon"
+license = "MIT"
+
+[features]
+default = []
+live-trading = []
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# HTTP / WebSocket
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+
+# Solana
+solana-sdk = "1.18"
+solana-client = "1.18"
+solana-transaction-status = "1.18"
+bs58 = "0.5"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+dotenvy = "0.15"
+
+# Telegram
+teloxide = { version = "0.12", features = ["macros", "auto-send"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.0", features = ["v4"] }
+
+# Rate limiting
+governor = "0.6"
+
+# Math / finance
+rust_decimal = { version = "1.33", features = ["serde"] }
+rust_decimal_macros = "1.33"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# Hex encoding for tx signatures
+hex = "0.4"
+
+# Base64
+base64 = "0.22"
